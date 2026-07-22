@@ -23,8 +23,8 @@
       var D2R = Math.PI / 180;
       var TILT = 30 * D2R;          // view latitude 40N
       var cosT = Math.cos(TILT), sinT = Math.sin(TILT);
-      var SCALE = 0.2;             // globe radius / max(viewport w,h)
-      var CY_FRAC = 0.52;           // vertical center
+      var SCALE = 0.52;             // globe radius / max(viewport w,h)
+      var CY_FRAC = 0.56;           // vertical center
       var SECS_PER_REV = 180;       // rotation period
   
       var prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
