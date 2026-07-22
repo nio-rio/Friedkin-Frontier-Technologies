@@ -23,7 +23,7 @@
       var D2R = Math.PI / 180;
       var TILT = 30 * D2R;          // view latitude 40N
       var cosT = Math.cos(TILT), sinT = Math.sin(TILT);
-      var SCALE = 0.56;             // globe radius / max(viewport w,h)
+      var SCALE = 0.5;             // globe radius / max(viewport w,h)
       var CY_FRAC = 0.52;           // vertical center
       var SECS_PER_REV = 180;       // rotation period
   
