@@ -1,7 +1,6 @@
 /*
  * Rotating wireframe globe — production build
- * Settings baked in: tilt=40, scale=0.72, cy=0.52, speed=180, bg=#0b2220
- * No selector / no control panel.
+ * Settings baked in
  *
  * Usage: place <div class="wfg-globe" id="wfg-globe"></div> on the page
  * (with the small CSS block) and load this script. It creates its own canvas.
