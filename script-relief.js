@@ -1,0 +1,448 @@
+
+/* Relief effect — plaster-to-metal cursor reveal.
+   Usage: <div data-relief data-base="URL" data-normal="URL" [data-mask="URL"]
+               [data-brush="0.16"] [data-decay="0.986"] [data-intro="1"]></div>
+   Include this script once per page (before </body>). It initializes every
+   [data-relief] element. If data-mask is omitted, a silhouette mask is
+   generated automatically from the normal map. */
+(function () {
+  "use strict";
+
+  var VS = "attribute vec2 aPos;varying vec2 vUv;void main(){vUv=aPos*0.5+0.5;gl_Position=vec4(aPos,0.,1.);}";
+
+  var FS_SMUDGE = [
+    "precision highp float;varying vec2 vUv;",
+    "uniform sampler2D uPrev;uniform vec2 uMouse,uPrevMouse;",
+    "uniform float uAspect,uTime,uBrush,uActive,uDecay;",
+    "float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123);}",
+    "float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);",
+    " return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);}",
+    "void main(){",
+    " float a=noise(vUv*3.5+uTime*0.10)*6.28318;",
+    " float prev=texture2D(uPrev,vUv+vec2(cos(a),sin(a))*0.0014).r;",
+    " prev*=uDecay;",
+    " prev-=(noise(vUv*10.0-uTime*0.25)*0.5+0.25)*0.010*prev;",
+    " vec2 p=vec2(vUv.x*uAspect,vUv.y);",
+    " vec2 A=vec2(uPrevMouse.x*uAspect,uPrevMouse.y);",
+    " vec2 B=vec2(uMouse.x*uAspect,uMouse.y);",
+    " vec2 pa=p-A,ba=B-A;",
+    " float h=clamp(dot(pa,ba)/max(dot(ba,ba),1e-6),0.,1.);",
+    " float d=length(pa-ba*h);",
+    " float stamp=smoothstep(uBrush,uBrush*0.25,d)*uActive;",
+    " gl_FragColor=vec4(clamp(max(prev,stamp),0.,1.),0.,0.,1.);}"
+  ].join("\n");
+
+  var FS_MAIN = [
+    "precision highp float;varying vec2 vUv;",
+    "uniform sampler2D uBase,uNormal,uMask,uSmudge;",
+    "uniform vec2 uMouse,uFit;uniform float uAspect,uFlipX,uGamma;",
+    "void main(){",
+    " vec2 uv=(vUv-0.5)*uFit+0.5;",
+    " if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0){gl_FragColor=vec4(0.0);return;}",
+    " vec4 baseT=texture2D(uBase,uv);",
+    " vec3 base=baseT.rgb;",
+    " vec3 nrm=texture2D(uNormal,uv).rgb;",
+    " float mask=texture2D(uMask,uv).r;",
+    " float s=texture2D(uSmudge,uv).r;",
+    " vec3 N=normalize(vec3((nrm.r*2.0-1.0)*uFlipX,nrm.g*2.0-1.0,max(nrm.b*2.0-1.0,0.15)));",
+    " N=normalize(mix(vec3(0.0,0.0,1.0),N,smoothstep(0.0,0.6,mask)));",
+    " vec3 frag=vec3(uv.x*uAspect,uv.y,0.0);",
+    " vec3 lp=vec3(uMouse.x*uAspect,uMouse.y,0.42);",
+    " vec3 L=normalize(lp-frag);",
+    " float att=smoothstep(1.05,0.0,distance(lp.xy,frag.xy));",
+    " float diff=max(dot(N,L),0.0);",
+    " vec3 V=vec3(0.,0.,1.);vec3 Hh=normalize(L+V);",
+    " float specP=pow(max(dot(N,Hh),0.0),22.0);",
+    " vec3 plaster=base*(0.94+0.22*diff*att)+vec3(0.06)*specP*att*mask;",
+    " vec3 Nm=normalize(vec3(N.xy*1.55,N.z));",
+    " float band=Nm.y*0.5+0.5;",
+    " vec3 mc=mix(vec3(0.16,0.17,0.20),vec3(0.78,0.80,0.83),smoothstep(0.14,0.90,band));",
+    " float horizon=exp(-pow((band-0.46)*6.5,2.0));",
+    " mc=mix(mc,vec3(0.38,0.40,0.44),horizon*0.5);",
+    " float lum=dot(base,vec3(0.299,0.587,0.114));",
+    " float fres=pow(1.0-abs(Nm.z),2.0);",
+    " float tone=pow(lum,uGamma);",
+    " vec3 metal=mc*(0.16+1.05*tone);",
+    " float specM=pow(max(dot(Nm,Hh),0.0),34.0);",
+    " metal+=vec3(1.0,1.0,1.03)*specM*att*0.30;",
+    " metal+=vec3(0.10,0.11,0.13)*fres;",
+    " metal+=mc*0.12*diff*att;",
+    " metal*=0.96;",
+    " metal=clamp(metal,0.0,1.0);",
+    " metal=mix(metal,metal*metal*(3.0-2.0*metal),0.45);",
+    " float reveal=smoothstep(0.08,0.75,s)*mask;",
+    " vec3 col=mix(plaster,metal,reveal);",
+    " gl_FragColor=vec4(col*baseT.a,baseT.a);}"
+  ].join("\n");
+
+
+  /* Ghost mode: no base image. The object is a solid-color model whose color
+     matches the page background -- invisible until the cursor light hits it.
+     Visibility rides the smudge trail, so it fades away after the cursor. */
+  var FS_GHOST = [
+    "precision highp float;varying vec2 vUv;",
+    "uniform sampler2D uNormal,uMask,uSmudge;",
+    "uniform vec2 uMouse,uFit;uniform float uAspect,uFlipX;uniform vec3 uColor;",
+    "void main(){",
+    " vec2 uv=(vUv-0.5)*uFit+0.5;",
+    " if(uv.x<0.0||uv.x>1.0||uv.y<0.0||uv.y>1.0){gl_FragColor=vec4(0.0);return;}",
+    " vec3 nrm=texture2D(uNormal,uv).rgb;",
+    " float mask=texture2D(uMask,uv).r;",
+    " float s=texture2D(uSmudge,uv).r;",
+    " vec3 N=normalize(vec3((nrm.r*2.0-1.0)*uFlipX,nrm.g*2.0-1.0,max(nrm.b*2.0-1.0,0.15)));",
+    " N=normalize(mix(vec3(0.0,0.0,1.0),N,smoothstep(0.0,0.6,mask)));",
+    " vec3 frag=vec3(uv.x*uAspect,uv.y,0.0);",
+    " vec3 lp=vec3(uMouse.x*uAspect,uMouse.y,0.42);",
+    " vec3 L=normalize(lp-frag);",
+    " float att=smoothstep(1.05,0.0,distance(lp.xy,frag.xy));",
+    " float diff=max(dot(N,L),0.0);",
+    " vec3 V=vec3(0.,0.,1.);vec3 Hh=normalize(L+V);",
+    " float spec=pow(max(dot(N,Hh),0.0),42.0);",
+    /* form shading around the object color: shadow side sinks below it,
+       lit side lifts above it, plus a white cursor highlight */
+    " vec3 col=uColor*(0.28+1.25*diff*mix(0.5,1.0,att));",
+    " col+=vec3(1.0,1.0,0.97)*spec*att*0.55;",
+    " float vis=smoothstep(0.02,0.7,s)*mask;",
+    " gl_FragColor=vec4(col*vis,vis);}"
+  ].join("\n");
+
+  function hexToRgb(hx) {
+    hx = (hx || "").replace("#", "");
+    if (hx.length === 3) hx = hx[0]+hx[0]+hx[1]+hx[1]+hx[2]+hx[2];
+    var v = parseInt(hx, 16);
+    if (isNaN(v)) v = 0x042621;
+    return [(v >> 16 & 255) / 255, (v >> 8 & 255) / 255, (v & 255) / 255];
+  }
+
+  function loadImg(src) {
+    return new Promise(function (res, rej) {
+      var i = new Image();
+      i.crossOrigin = "anonymous";
+      i.onload = function () { res(i); };
+      i.onerror = rej;
+      i.src = src;
+    });
+  }
+
+  /* Auto-generate a silhouette mask from the normal map:
+     flood-fill background from the borders, everything enclosed = object. */
+  function autoMask(normalImg) {
+    var w = Math.min(512, normalImg.naturalWidth);
+    var h = Math.round(normalImg.naturalHeight * w / normalImg.naturalWidth);
+    var c = document.createElement("canvas"); c.width = w; c.height = h;
+    var x = c.getContext("2d", { willReadFrequently: true });
+    x.drawImage(normalImg, 0, 0, w, h);
+    var d = x.getImageData(0, 0, w, h).data;
+    // if the normal map has real transparency, its alpha IS the mask
+    var transparent = 0, total = w * h;
+    for (var ai = 3; ai < d.length; ai += 4) if (d[ai] < 200) transparent++;
+    if (transparent > total * 0.01) {
+      var outA = x.createImageData(w, h);
+      for (var ki = 0; ki < total; ki++) {
+        var oa = ki * 4, v = d[oa + 3];
+        outA.data[oa] = outA.data[oa + 1] = outA.data[oa + 2] = v; outA.data[oa + 3] = 255;
+      }
+      x.putImageData(outA, 0, 0);
+      var cA = document.createElement("canvas"); cA.width = w >> 1; cA.height = h >> 1;
+      cA.getContext("2d").drawImage(c, 0, 0, cA.width, cA.height);
+      x.drawImage(cA, 0, 0, w, h);
+      return c;
+    }
+    // otherwise: flood-fill silhouette from the background color
+    // background color = average of corners
+    var br = 0, bgc = 0, bb = 0, corners = [0, (w - 1) * 4, (h - 1) * w * 4, ((h - 1) * w + w - 1) * 4];
+    corners.forEach(function (o) { br += d[o]; bgc += d[o + 1]; bb += d[o + 2]; });
+    br /= 4; bgc /= 4; bb /= 4;
+    var THR = 66;
+    var n = w * h;
+    // notBg[i] = 1 where the pixel differs from the background color
+    var notBg = new Uint8Array(n);
+    for (var i0 = 0; i0 < n; i0++) {
+      var o = i0 * 4;
+      if (Math.abs(d[o] - br) + Math.abs(d[o + 1] - bgc) + Math.abs(d[o + 2] - bb) >= THR) notBg[i0] = 1;
+    }
+    // dilate the outline (3 passes) to seal small gaps, so the background
+    // flood fill can't leak into flat interior regions (which share the
+    // background's flat-normal color)
+    var DIL = 3;
+    var dilate = function (src) {
+      var dst = new Uint8Array(n);
+      for (var p = 0; p < n; p++) {
+        if (src[p]) { dst[p] = 1; continue; }
+        var px = p % w, py = (p / w) | 0;
+        if ((px > 0 && src[p - 1]) || (px < w - 1 && src[p + 1]) ||
+            (py > 0 && src[p - w]) || (py < h - 1 && src[p + w])) dst[p] = 1;
+      }
+      return dst;
+    };
+    var barrier = notBg;
+    for (var di = 0; di < DIL; di++) barrier = dilate(barrier);
+    // flood-fill true background from the borders, blocked by the barrier
+    var visited = new Uint8Array(n), stack = [];
+    for (var i = 0; i < w; i++) { stack.push(i); stack.push((h - 1) * w + i); }
+    for (var j = 0; j < h; j++) { stack.push(j * w); stack.push(j * w + w - 1); }
+    while (stack.length) {
+      var p = stack.pop();
+      if (visited[p] || barrier[p]) continue;
+      visited[p] = 1;
+      var px = p % w, py = (p / w) | 0;
+      if (px > 0) stack.push(p - 1);
+      if (px < w - 1) stack.push(p + 1);
+      if (py > 0) stack.push(p - w);
+      if (py < h - 1) stack.push(p + w);
+    }
+    // object = everything not reached; erode back by the same amount
+    var obj = new Uint8Array(n);
+    for (var k0 = 0; k0 < n; k0++) obj[k0] = visited[k0] ? 0 : 1;
+    var erode = function (src) {
+      var dst = new Uint8Array(n);
+      for (var p = 0; p < n; p++) {
+        if (!src[p]) continue;
+        var px = p % w, py = (p / w) | 0;
+        if (px === 0 || py === 0 || px === w - 1 || py === h - 1) continue;
+        if (src[p - 1] && src[p + 1] && src[p - w] && src[p + w]) dst[p] = 1;
+      }
+      return dst;
+    };
+    for (var ei = 0; ei < DIL; ei++) obj = erode(obj);
+    var out = x.createImageData(w, h);
+    for (var k = 0; k < n; k++) {
+      var v = obj[k] ? 255 : 0, o2 = k * 4;
+      out.data[o2] = out.data[o2 + 1] = out.data[o2 + 2] = v; out.data[o2 + 3] = 255;
+    }
+    x.putImageData(out, 0, 0);
+    // cheap feather: downscale + upscale
+    var c2 = document.createElement("canvas"); c2.width = w >> 1; c2.height = h >> 1;
+    c2.getContext("2d").drawImage(c, 0, 0, c2.width, c2.height);
+    x.drawImage(c2, 0, 0, w, h);
+    return c;
+  }
+
+  function Relief(el) {
+    var self = this;
+    this.el = el;
+    this.brush = parseFloat(el.dataset.brush || "0.16");
+    this.decay = parseFloat(el.dataset.decay || "0.986");
+    this.intro = el.dataset.intro !== "0";
+    /* data-fit="cover" fills the container and crops overflow (centered);
+       default "contain" letterboxes and never crops */
+    this.fitMode = el.dataset.fit === "cover" ? "cover" : "contain";
+    /* data-flipx="1" (default): Gemini map with inverted red channel (DirectX-style X).
+       data-flipx="0": standard OpenGL red channel. If highlights move the wrong
+       way as the cursor moves, toggle this. */
+    this.flipX = el.dataset.flipx === "0" ? 1.0 : -1.0;
+    /* data-gamma: how base-image brightness maps to metal tone.
+       1.6 (default) suits light/plaster bases; ~0.55 suits dark photos. */
+    this.gamma = parseFloat(el.dataset.gamma || "1.6");
+    this.mouse = [0.5, 0.5]; this.prevMouse = [0.5, 0.5];
+    this.active = 0; this.lastMove = 0; this.touched = false;
+    this.visible = true; this.running = false;
+
+    var canvas = document.createElement("canvas");
+    canvas.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;cursor:crosshair";
+    if (getComputedStyle(el).position === "static") el.style.position = "relative";
+    el.appendChild(canvas);
+    this.canvas = canvas;
+
+    var gl = canvas.getContext("webgl", { antialias: false, alpha: true, premultipliedAlpha: true });
+    if (!gl) return;
+    this.gl = gl;
+
+    /* ghost mode: no data-base -> solid-color cursor-lit model.
+       data-color sets the model color (default #042621); make it match
+       your page background so the object is invisible at rest. */
+    this.ghost = !el.dataset.base;
+    this.color = hexToRgb(el.dataset.color || "#042621");
+
+    Promise.all([
+      this.ghost ? null : loadImg(el.dataset.base),
+      loadImg(el.dataset.normal),
+      el.dataset.mask ? loadImg(el.dataset.mask) : null
+    ]).then(function (imgs) {
+      self.setup(imgs[0], imgs[1], imgs[2] || autoMask(imgs[1]));
+    }).catch(function (e) {
+      console.error("[relief] failed to load images for", el, e);
+    });
+  }
+
+  Relief.prototype.compile = function (type, src) {
+    var gl = this.gl, sh = gl.createShader(type);
+    gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    return sh;
+  };
+  Relief.prototype.program = function (fs) {
+    var gl = this.gl, p = gl.createProgram();
+    gl.attachShader(p, this.compile(gl.VERTEX_SHADER, VS));
+    gl.attachShader(p, this.compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    return p;
+  };
+  Relief.prototype.imgTex = function (img) {
+    var gl = this.gl, t = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return t;
+  };
+
+  Relief.prototype.setup = function (baseImg, normImg, maskSrc) {
+    var self = this, gl = this.gl, el = this.el, canvas = this.canvas;
+
+    var ref = baseImg || normImg;
+    this.aspect = ref.naturalWidth / ref.naturalHeight;
+    if (!el.style.aspectRatio && !el.dataset.noAspect)
+      el.style.aspectRatio = ref.naturalWidth + "/" + ref.naturalHeight;
+
+    if (baseImg) this.tBase = this.imgTex(baseImg);
+    this.tNorm = this.imgTex(normImg);
+    this.tMask = this.imgTex(maskSrc);
+
+    var quad = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+    this.quad = quad;
+
+    this.pSmudge = this.program(FS_SMUDGE);
+    this.pMain = this.program(this.ghost ? FS_GHOST : FS_MAIN);
+
+    var SW = 512, SH = Math.max(64, Math.round(512 / this.aspect));
+    this.SW = SW; this.SH = SH;
+    this.pass = [0, 1].map(function () {
+      var tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, SW, SH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      var fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      return { tex: tex, fb: fb };
+    });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.cur = 0;
+
+    function onMove(e) {
+      var r = canvas.getBoundingClientRect();
+      var f = self.fit();
+      var mx = (e.clientX - r.left) / r.width, my = 1 - (e.clientY - r.top) / r.height;
+      self.mouse = [(mx - 0.5) * f[0] + 0.5, (my - 0.5) * f[1] + 0.5];
+      self.active = 1; self.lastMove = performance.now(); self.touched = true;
+    }
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerdown", onMove);
+    canvas.addEventListener("pointerleave", function () { self.active = 0; });
+
+    function resize() {
+      var r = canvas.getBoundingClientRect();
+      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.max(2, Math.round(r.width * dpr));
+      canvas.height = Math.max(2, Math.round(r.height * dpr));
+    }
+    resize();
+    if (window.ResizeObserver) new ResizeObserver(resize).observe(el);
+    else window.addEventListener("resize", resize);
+
+    if (window.IntersectionObserver) {
+      new IntersectionObserver(function (en) {
+        self.visible = en[0].isIntersecting;
+        if (self.visible && !self.running) self.start();
+      }, { rootMargin: "100px" }).observe(el);
+    }
+
+    this.reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    this.t0 = performance.now();
+    this.start();
+  };
+
+  Relief.prototype.fit = function () {
+    var ca = this.canvas.width / Math.max(1, this.canvas.height);
+    if (this.fitMode === "cover")
+      return ca > this.aspect ? [1, this.aspect / ca] : [ca / this.aspect, 1];
+    return ca > this.aspect ? [ca / this.aspect, 1] : [1, this.aspect / ca];
+  };
+
+  Relief.prototype.start = function () {
+    if (this.running) return;
+    this.running = true;
+    var self = this;
+    (function loop(now) {
+      if (!self.visible) { self.running = false; return; }
+      self.frame(now || performance.now());
+      requestAnimationFrame(loop);
+    })(performance.now());
+  };
+
+  Relief.prototype.frame = function (now) {
+    var gl = this.gl, t = (now - this.t0) / 1000;
+
+    if (!this.touched && !this.reduced && this.intro && t > 0.6 && t < 3.4) {
+      var k = (t - 0.6) / 2.8;
+      this.mouse = [0.5 + Math.sin(k * Math.PI * 1.5) * 0.055, 0.86 - k * 0.72];
+      this.active = 1;
+    } else if (!this.touched) this.active = 0;
+    if (this.touched && now - this.lastMove > 120) this.active = 0;
+
+    var U = function (p, n) { return gl.getUniformLocation(p, n); };
+    var bindQuad = function (p) {
+      var loc = gl.getAttribLocation(p, "aPos");
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    };
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quad);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.pass[1 - this.cur].fb);
+    gl.viewport(0, 0, this.SW, this.SH);
+    gl.useProgram(this.pSmudge); bindQuad(this.pSmudge);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.pass[this.cur].tex);
+    gl.uniform1i(U(this.pSmudge, "uPrev"), 0);
+    gl.uniform2fv(U(this.pSmudge, "uMouse"), this.mouse);
+    gl.uniform2fv(U(this.pSmudge, "uPrevMouse"), this.prevMouse);
+    gl.uniform1f(U(this.pSmudge, "uAspect"), this.aspect);
+    gl.uniform1f(U(this.pSmudge, "uTime"), t);
+    gl.uniform1f(U(this.pSmudge, "uBrush"), this.brush);
+    gl.uniform1f(U(this.pSmudge, "uActive"), this.active);
+    gl.uniform1f(U(this.pSmudge, "uDecay"), this.decay);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    this.cur = 1 - this.cur;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.useProgram(this.pMain); bindQuad(this.pMain);
+    if (!this.ghost) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.tBase); }
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.tNorm);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.tMask);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.pass[this.cur].tex);
+    if (!this.ghost) gl.uniform1i(U(this.pMain, "uBase"), 0);
+    gl.uniform1i(U(this.pMain, "uNormal"), 1);
+    gl.uniform1i(U(this.pMain, "uMask"), 2);
+    gl.uniform1i(U(this.pMain, "uSmudge"), 3);
+    if (this.ghost) gl.uniform3fv(U(this.pMain, "uColor"), this.color);
+    gl.uniform2fv(U(this.pMain, "uMouse"), this.mouse);
+    gl.uniform1f(U(this.pMain, "uAspect"), this.aspect);
+    gl.uniform1f(U(this.pMain, "uFlipX"), this.flipX);
+    if (!this.ghost) gl.uniform1f(U(this.pMain, "uGamma"), this.gamma);
+    gl.uniform2fv(U(this.pMain, "uFit"), this.fit());
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    this.prevMouse = this.mouse.slice();
+  };
+
+  function init() {
+    document.querySelectorAll("[data-relief]").forEach(function (el) {
+      if (!el.__relief) el.__relief = new Relief(el);
+    });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+  window.ReliefEffect = { init: init };
+})();
